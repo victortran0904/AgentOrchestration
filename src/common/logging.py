@@ -3,23 +3,54 @@
 import json
 import logging
 import sys
-from datetime import datetime
-from typing import Dict, Optional
+from datetime import datetime, timezone
+from typing import Dict
+
+from .redaction import sanitize_value
+
+
+_STANDARD_RECORD_ATTRS = {
+    "args",
+    "asctime",
+    "created",
+    "exc_info",
+    "exc_text",
+    "filename",
+    "funcName",
+    "levelname",
+    "levelno",
+    "lineno",
+    "message",
+    "module",
+    "msecs",
+    "msg",
+    "name",
+    "pathname",
+    "process",
+    "processName",
+    "relativeCreated",
+    "stack_info",
+    "thread",
+    "threadName",
+}
 
 
 class StructuredFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         log_entry: Dict = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
         }
-        if hasattr(record, "request_id"):
-            log_entry["request_id"] = record.request_id
+        for key, value in record.__dict__.items():
+            if key not in _STANDARD_RECORD_ATTRS and not key.startswith("_"):
+                log_entry[key] = value
         if record.exc_info and record.exc_info[0]:
             log_entry["exception"] = self.formatException(record.exc_info)
-        return json.dumps(log_entry)
+        return json.dumps(sanitize_value(log_entry), default=str)
 
 
 def configure_logging(level: str = "INFO", json_output: bool = True) -> None:
@@ -27,8 +58,15 @@ def configure_logging(level: str = "INFO", json_output: bool = True) -> None:
     if json_output:
         handler.setFormatter(StructuredFormatter())
     else:
-        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-    logging.basicConfig(level=getattr(logging, level.upper(), logging.INFO), handlers=[handler])
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+            )
+        )
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        handlers=[handler],
+    )
 
 # 2019-01-14T10:37:21 update
 
