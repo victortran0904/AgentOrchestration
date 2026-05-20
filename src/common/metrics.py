@@ -42,10 +42,11 @@ class MetricsCollector:
         with self._lock:
             histograms = {}
             for metric, values in self._histograms.items():
+                total = sum(values)
                 histograms[metric] = {
                     "count": len(values),
-                    "sum": sum(values),
-                    "avg": sum(values) / len(values) if values else 0,
+                    "sum": total,
+                    "avg": total / len(values) if values else 0,
                 }
             return {
                 "counters": dict(self._counters),

@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 
 from fastapi.testclient import TestClient
 
@@ -71,7 +72,10 @@ def test_valid_records_are_sanitized_and_public_snapshot_has_no_raw_secrets():
         service.get_delivery_log(workspace_id="ws-1"),
         sort_keys=True,
     )
-    stored_snapshot = json.dumps(service._records, sort_keys=True)
+    stored_snapshot = json.dumps(
+        service.stored_records_snapshot(),
+        sort_keys=True,
+    )
     for persisted in (snapshot, stored_snapshot):
         assert "signing-secret" not in persisted
         assert "query-secret" not in persisted
@@ -209,6 +213,71 @@ def test_retry_idempotency_preserves_first_sanitized_record():
     retry_snapshot = json.dumps(records, sort_keys=True)
     assert "second-secret" not in retry_snapshot
     assert "second-auth-secret" not in retry_snapshot
+
+
+def test_retry_idempotency_concurrent_calls_store_single_retry_record():
+    service = WebhookDeliveryService()
+    endpoint = service.register_endpoint(
+        workspace_id="ws-retry-race",
+        url="https://retry-race.example.test/hook",
+        verified=True,
+    )
+    gate = threading.Barrier(2)
+    original_record = service._record
+
+    def gated_record(*args, **kwargs):
+        gate.wait(timeout=2)
+        return original_record(*args, **kwargs)
+
+    service._record = gated_record
+    results = [None, None]
+    errors = []
+    payload_tokens = ["first-secret", "second-secret"]
+    auth_tokens = ["Bearer first-auth-secret", "Bearer second-auth-secret"]
+
+    def worker(index):
+        try:
+            results[index] = service.record_retry(
+                workspace_id="ws-retry-race",
+                endpoint_id=endpoint["id"],
+                event_id="evt-race",
+                attempt=3,
+                endpoint_version=1,
+                payload={"token": payload_tokens[index]},
+                headers={"Authorization": auth_tokens[index]},
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert not errors
+    assert all(result is not None for result in results)
+    assert results[0] == results[1]
+
+    snapshot = service.stored_records_snapshot()
+    stored = [
+        record
+        for record in snapshot
+        if record["workspace_id"] == "ws-retry-race"
+        and record["endpoint_id"] == endpoint["id"]
+        and record["event_id"] == "evt-race"
+        and record["attempt"] == 3
+    ]
+    assert len(stored) == 1
+    assert stored[0]["id"] == results[0]["id"]
+    assert stored[0]["payload"]["token"] == REDACTED
+    assert stored[0]["headers"]["Authorization"] == REDACTED
+
+    stored_snapshot = json.dumps(stored, sort_keys=True)
+    assert "first-secret" not in stored_snapshot
+    assert "second-secret" not in stored_snapshot
+    assert "first-auth-secret" not in stored_snapshot
+    assert "second-auth-secret" not in stored_snapshot
 
 
 def test_api_routes_use_app_isolated_service_state_and_sanitized_responses():

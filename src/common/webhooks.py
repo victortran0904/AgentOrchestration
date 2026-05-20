@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import time
 import uuid
 from threading import RLock
@@ -177,12 +176,7 @@ class WebhookDeliveryService:
             event_id,
             attempt,
         )
-        with self._lock:
-            existing = self._retry_records.get(retry_key)
-            if existing is not None:
-                return self._public_record(existing)
-
-        record = self._record(
+        return self._record(
             record_type="retry",
             workspace_id=workspace_id,
             endpoint_id=endpoint_id,
@@ -201,7 +195,6 @@ class WebhookDeliveryService:
             runtime=runtime,
             retry_key=retry_key,
         )
-        return record
 
     def get_delivery_log(
         self,
@@ -221,6 +214,10 @@ class WebhookDeliveryService:
                 and (event_id is None or record.get("event_id") == event_id)
             ]
         return [self._public_record(record) for record in records]
+
+    def stored_records_snapshot(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return [self._public_record(record) for record in self._records]
 
     def _record(
         self,
@@ -243,6 +240,11 @@ class WebhookDeliveryService:
         retry_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         with self._lock:
+            if retry_key is not None:
+                existing = self._retry_records.get(retry_key)
+                if existing is not None:
+                    return self._public_record(existing)
+
             endpoint, rejection_reason = self._resolve_endpoint_state(
                 workspace_id=workspace_id,
                 endpoint_id=endpoint_id,
@@ -280,9 +282,6 @@ class WebhookDeliveryService:
             sanitized_record = self._public_record(record)
             self._records.append(sanitized_record)
             if retry_key is not None:
-                existing = self._retry_records.get(retry_key)
-                if existing is not None:
-                    return self._public_record(existing)
                 self._retry_records[retry_key] = sanitized_record
             return self._public_record(sanitized_record)
 
@@ -343,7 +342,7 @@ class WebhookDeliveryService:
             return tuple(self._strip_internal_fields(item) for item in value)
         if isinstance(value, set):
             return {self._strip_internal_fields(item) for item in value}
-        return copy.deepcopy(value)
+        return value
 
     def _retry_key(
         self,
